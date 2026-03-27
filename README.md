@@ -1,76 +1,40 @@
-# BoN Challenge 5 — Agent Arena
+# BoN Agent Arena
 
-10-agent orchestrator for the Battle of Nodes Red Light / Green Light challenge.
+10-agent orchestrator for the Battle of Nodes Red Light / Green Light challenge. Agents send transactions when GREEN, stop on RED. Commands are interpreted semantically via Gemini (handles double negatives, jokes, indirect phrasing, vocab redefinitions).
 
----
+## Setup
 
-## Challenge Day (March 27, 2026)
-
-### Before 15:00 UTC
 ```bash
-cp .env.example .env
-# Fill in:
-#   GL_PRIVATE_KEY_HEX=<guild leader private key>
-#   GOOGLE_GENERATIVE_AI_API_KEY=<gemini api key>
+cp .env.example .env   # fill in GL_PRIVATE_KEY_HEX + GOOGLE_GENERATIVE_AI_API_KEY
+npm install
+```
+
+## Challenge day
+
+```bash
+# As early as possible — generates wallets, waits for GL funding, funds agents
 npm start
-# → generates 10 wallets, waits for funds
-```
 
-### At 15:00 UTC — wallets + addresses announced
-Add to `.env`:
-```
-ADMIN_WALLET_ADDRESS=erd1...
-TARGET_WALLET_ADDRESS=erd1...
-```
-Then restart:
-```bash
-npm start
-# → funds agents, registers all 10 via MX-8004, counts down to 16:00, runs
-```
+# Once ADMIN_WALLET_ADDRESS + TARGET_WALLET_ADDRESS are announced (~15:00 UTC):
+# → add them to .env
 
-### 16:00 UTC — Round 1 starts
-The script is already running. Nothing to do.
+# Register agents on devnet (before 15:45 UTC)
+npm run register
 
-### 16:30 UTC — Break
-Agents auto-stop (state = RED after last command). Use the break to check logs.
-
-### 17:00 UTC — Round 2
-Still running. Nothing to do.
-
-### 17:30 UTC — Done
-```
-Ctrl+C
-```
-
----
-
-## How to Test
-
-### Run unit tests
-```bash
-npm test
-```
-
-### Simulate the challenge locally (end-to-end)
-Terminal 1 — start the simulator (sends commands as the admin wallet):
-```bash
-npm run simulate
-```
-
-Terminal 2 — start your agent (reads and reacts to those commands):
-```bash
+# Start agents (before round 1 at 16:00 UTC) — Ctrl+C after round 2 ends
 npm start
 ```
 
-Watch your agent log to verify GREEN/RED interpretations match the simulator output.
+`npm start` is idempotent — reuses existing wallets and skips already-funded agents.
+Tuning (agents, batch size, gas, etc.) is in `src/config.ts`.
 
----
+## Testing
 
-## What it does
+```bash
+npm test                   # unit tests — nonce, interpreter, sender logic
 
-- **10 agents in parallel** — each with its own wallet, nonce, and sender loop
-- **Gemini 3.1 Flash Lite** — semantic interpretation of admin commands, handles adversarial phrasing
-- **Pre-built TX queue** — next batch is signed while current batch broadcasts (half the latency)
-- **Nonce safety** — never syncs mid-green; force-resyncs + clears queue after RED
-- **Keep-alive HTTP** — persistent connections to API, minimal overhead per TX
-- **~1,600+ TXs/sec** peak across all 10 agents
+npm run simulate           # terminal 1: sends adversarial green/red commands as admin
+npm start                  # terminal 2: agents react to simulator commands
+
+npm run validate           # validate Gemini accuracy on 43 adversarial cases (needs GOOGLE_GENERATIVE_AI_API_KEY)
+```

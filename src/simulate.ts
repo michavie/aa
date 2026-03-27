@@ -20,16 +20,17 @@ import { UserSigner, UserSecretKey } from "@multiversx/sdk-wallet";
 import { Transaction, Address, TransactionComputer } from "@multiversx/sdk-core";
 import axios from "axios";
 import { config as loadEnv } from "dotenv";
+import { CONFIG } from "./config";
 
 loadEnv();
 
-const API_URL       = process.env.MULTIVERSX_API_URL    || "https://api.battleofnodes.com";
-const CHAIN_ID      = process.env.CHAIN_ID              || "BON-1";
-const ADMIN_KEY     = process.env.SIMULATE_ADMIN_KEY    || process.env.GL_PRIVATE_KEY_HEX || "";
+const API_URL       = CONFIG.BON_API;
+const CHAIN_ID      = CONFIG.BON_CHAIN;
+const ADMIN_KEY     = process.env.SIMULATE_ADMIN_KEY || process.env.GL_PRIVATE_KEY_HEX || "";
 const TARGET_WALLET = process.env.TARGET_WALLET_ADDRESS || "";
 
-const GAS_LIMIT     = BigInt(60_000);
-const GAS_PRICE     = BigInt(1_000_000_000);
+const GAS_LIMIT     = CONFIG.FUND_GAS;
+const GAS_PRICE     = CONFIG.GAS_PRICE;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMMAND SETS

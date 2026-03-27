@@ -6,6 +6,7 @@
     "start": "ts-node src/run.ts",
     "wallet": "ts-node src/wallet.ts",
     "test": "jest --runInBand",
+    "register": "ts-node src/register.ts",
     "simulate": "ts-node src/simulate.ts",
     "validate": "ts-node src/validate-interpreter.ts"
   },

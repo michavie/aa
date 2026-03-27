@@ -14,13 +14,14 @@
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
 import { config as loadEnv } from "dotenv";
+import { CONFIG } from "./config";
 
 loadEnv();
 
 const GOOGLE_KEY = process.env.GOOGLE_GENERATIVE_AI_API_KEY || "";
 if (!GOOGLE_KEY) { console.error("Missing GOOGLE_GENERATIVE_AI_API_KEY"); process.exit(1); }
 
-const gemini = google("gemini-3.1-flash-lite-preview", { apiKey: GOOGLE_KEY } as any);
+const gemini = google(CONFIG.GEMINI_MODEL, { apiKey: GOOGLE_KEY } as any);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GROUND-TRUTH TEST CASES

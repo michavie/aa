@@ -2,3 +2,4 @@ node_modules/
 dist/
 .env
 agents.json
+.DS_Store
