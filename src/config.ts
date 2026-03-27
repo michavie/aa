@@ -18,7 +18,7 @@ export const CONFIG = {
 
   // ─── TX parameters ────────────────────────────────────────────────────────
   GAS_LIMIT:  BigInt(50_000),
-  GAS_PRICE:  BigInt(1_000_000_000),
+  GAS_PRICE:  BigInt(2_500_000_000),
   FUND_GAS:   BigInt(60_000),
   REG_GAS:    BigInt(30_000_000),
 
