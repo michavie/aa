@@ -1,0 +1,23 @@
+{
+  "name": "bon-agent-arena",
+  "version": "1.0.0",
+  "description": "MultiversX BoN Challenge 5 — Agent Arena",
+  "scripts": {
+    "start": "ts-node src/run.ts",
+    "wallet": "ts-node src/wallet.ts"
+  },
+  "dependencies": {
+    "ai": "^4.0.0",
+    "@ai-sdk/google": "^1.0.0",
+    "@multiversx/sdk-core": "^15.3.2",
+    "@multiversx/sdk-network-providers": "^2.9.3",
+    "@multiversx/sdk-wallet": "^4.6.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
+  }
+}
