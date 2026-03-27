@@ -14,7 +14,7 @@
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
 import { UserSigner, UserSecretKey } from "@multiversx/sdk-wallet";
-import { Transaction, TransactionPayload, Address } from "@multiversx/sdk-core";
+import { Transaction, Address, TransactionComputer } from "@multiversx/sdk-core";
 import axios, { AxiosInstance } from "axios";
 import { config } from "dotenv";
 
@@ -72,6 +72,7 @@ const http: AxiosInstance = axios.create({
 // ─────────────────────────────────────────────────────────────────────────────
 
 let signer: UserSigner;
+const txComputer = new TransactionComputer();
 
 function initWallet() {
   const key = UserSecretKey.fromString(PRIVATE_KEY);
@@ -172,21 +173,17 @@ Admin command: "${rawCommand}"`,
 async function buildAndSignTx(nonce: bigint): Promise<object> {
   const tx = new Transaction({
     nonce,
-    value: BigInt(0),
+    value:    BigInt(0),
     receiver: new Address(TARGET_WALLET),
-    sender: new Address(AGENT_ADDRESS),
+    sender:   new Address(AGENT_ADDRESS),
     gasPrice: GAS_PRICE,
     gasLimit: GAS_LIMIT,
-    data: new TransactionPayload("ping"),
-    chainID: CHAIN_ID,
-    version: 1,
+    data:     Buffer.from("ping"),
+    chainID:  CHAIN_ID,
+    version:  1,
   });
 
-  // Sign the transaction
-  const serialized = tx.serializeForSigning();
-  const signature = await signer.sign(serialized);
-  tx.applySignature(signature);
-
+  tx.signature = await signer.sign(txComputer.computeBytesForSigning(tx));
   return tx.toSendable();
 }
 
@@ -272,12 +269,17 @@ async function pollAdminCommands(): Promise<void> {
       const newGreen = intent === "GREEN";
 
       if (newGreen !== isGreenLight) {
+        const wasGreen = isGreenLight;
         isGreenLight = newGreen;
         console.log(
           isGreenLight
             ? "\n🟢🟢🟢 GREEN LIGHT — SENDING\n"
             : "\n🔴🔴🔴 RED LIGHT — STOPPED\n"
         );
+        // After going RED: wait for pending TXs to settle, then resync nonce
+        if (wasGreen && !isGreenLight) {
+          setTimeout(() => syncNonce(), 3_000);
+        }
       }
     }
 
@@ -347,9 +349,6 @@ async function main() {
     }
   }, SEND_MS);
 
-  // Periodic nonce re-sync (catch any gaps from failed TXs)
-  const nonceTimer = setInterval(syncNonce, 8_000);
-
   // Stats print
   const statsTimer = setInterval(() => {
     const elapsed = ((Date.now() - statStartTime) / 60_000).toFixed(1);
@@ -363,7 +362,6 @@ async function main() {
     isGreenLight = false; // Kill switch
     clearInterval(monitorTimer);
     clearInterval(senderTimer);
-    clearInterval(nonceTimer);
     clearInterval(statsTimer);
     console.log(`[Agent] Final: ${statTotal} total TXs, ${statPermitted} during green light`);
     process.exit(0);
