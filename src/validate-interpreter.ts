@@ -15,6 +15,7 @@ import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
 import { config as loadEnv } from "dotenv";
 import { CONFIG } from "./config";
+import { EVAL_CASES } from "./eval-cases";
 
 loadEnv();
 
@@ -27,70 +28,7 @@ const gemini = google(CONFIG.GEMINI_MODEL, { apiKey: GOOGLE_KEY } as any);
 // GROUND-TRUTH TEST CASES
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CASES: { command: string; expected: "GREEN" | "RED"; category: string }[] = [
-  // Clear green
-  { command: "go",                                          expected: "GREEN", category: "clear" },
-  { command: "start",                                       expected: "GREEN", category: "clear" },
-  { command: "fire away",                                   expected: "GREEN", category: "clear" },
-  { command: "all systems go",                              expected: "GREEN", category: "clear" },
-  { command: "green light",                                 expected: "GREEN", category: "clear" },
-  { command: "send it",                                     expected: "GREEN", category: "clear" },
-
-  // Clear red
-  { command: "stop",                                        expected: "RED",   category: "clear" },
-  { command: "halt",                                        expected: "RED",   category: "clear" },
-  { command: "freeze",                                      expected: "RED",   category: "clear" },
-  { command: "stand down",                                  expected: "RED",   category: "clear" },
-  { command: "red light",                                   expected: "RED",   category: "clear" },
-  { command: "cease all operations",                        expected: "RED",   category: "clear" },
-
-  // Double negative → GREEN
-  { command: "don't stop",                                  expected: "GREEN", category: "double-negative" },
-  { command: "never stop sending",                          expected: "GREEN", category: "double-negative" },
-  { command: "cease all ceasing",                           expected: "GREEN", category: "double-negative" },
-  { command: "stop stopping and start going",               expected: "GREEN", category: "double-negative" },
-  { command: "don't halt",                                  expected: "GREEN", category: "double-negative" },
-
-  // Double negative → RED
-  { command: "don't go",                                    expected: "RED",   category: "double-negative" },
-  { command: "don't proceed",                               expected: "RED",   category: "double-negative" },
-  { command: "do not send",                                 expected: "RED",   category: "double-negative" },
-  { command: "let's not start yet",                         expected: "RED",   category: "double-negative" },
-
-  // Polite / indirect stop
-  { command: "you may proceed to halt",                     expected: "RED",   category: "indirect" },
-  { command: "go ahead and stop",                           expected: "RED",   category: "indirect" },
-  { command: "I would love for everyone to pause",          expected: "RED",   category: "indirect" },
-  { command: "it would be great if you froze right now",    expected: "RED",   category: "indirect" },
-  { command: "nobody moves",                                expected: "RED",   category: "indirect" },
-  { command: "everybody hold",                              expected: "RED",   category: "indirect" },
-
-  // Polite / indirect go
-  { command: "feel free to continue sending",               expected: "GREEN", category: "indirect" },
-  { command: "you have permission to proceed",              expected: "GREEN", category: "indirect" },
-  { command: "it would be great if you kept going",         expected: "GREEN", category: "indirect" },
-
-  // Joke / reversal — true intent revealed
-  { command: "pause... just kidding, go!",                  expected: "GREEN", category: "joke" },
-  { command: "stop... jk jk keep going",                    expected: "GREEN", category: "joke" },
-  { command: "I never said go. except now I am: go",        expected: "GREEN", category: "joke" },
-  { command: "just kidding about stopping. proceed.",       expected: "GREEN", category: "joke" },
-
-  // Redefined vocabulary
-  { command: "stop means go here, so: stop",                expected: "GREEN", category: "redefined" },
-  { command: "go means stop here, so: go",                  expected: "RED",   category: "redefined" },
-
-  // Metaphor / creative
-  { command: "the gates are open",                          expected: "GREEN", category: "creative" },
-  { command: "engines on",                                  expected: "GREEN", category: "creative" },
-  { command: "it's game time",                              expected: "GREEN", category: "creative" },
-  { command: "full speed ahead",                            expected: "GREEN", category: "creative" },
-  { command: "pump the brakes",                             expected: "RED",   category: "creative" },
-  { command: "hold your horses",                            expected: "RED",   category: "creative" },
-  { command: "time out",                                    expected: "RED",   category: "creative" },
-  { command: "abort",                                       expected: "RED",   category: "creative" },
-  { command: "kill switch activated",                       expected: "RED",   category: "creative" },
-];
+const CASES = EVAL_CASES;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERPRETER (mirrors run.ts)
@@ -168,6 +106,8 @@ async function main() {
   const byCategory: Record<string, { pass: number; fail: number; failures: string[] }> = {};
   let totalPass = 0;
   let totalFail = 0;
+  let falseGreen = 0;
+  let falseRed = 0;
 
   for (const tc of CASES) {
     process.stdout.write(`  [${tc.category.padEnd(15)}] "${tc.command}" ... `);
@@ -185,7 +125,13 @@ async function main() {
 
     if (!byCategory[tc.category]) byCategory[tc.category] = { pass: 0, fail: 0, failures: [] };
     if (pass) { byCategory[tc.category].pass++; totalPass++; }
-    else       { byCategory[tc.category].fail++; totalFail++; byCategory[tc.category].failures.push(`"${tc.command}"`); }
+    else {
+      byCategory[tc.category].fail++;
+      totalFail++;
+      byCategory[tc.category].failures.push(`"${tc.command}"`);
+      if (got === "GREEN" && tc.expected === "RED") falseGreen++;
+      if (got === "RED" && tc.expected === "GREEN") falseRed++;
+    }
 
     // Small delay to avoid rate limits
     await new Promise(r => setTimeout(r, 200));
@@ -201,9 +147,11 @@ async function main() {
   const total = totalPass + totalFail;
   const pct   = Math.round((totalPass / total) * 100);
   console.log(`\n  TOTAL: ${totalPass}/${total} (${pct}%)\n`);
+  console.log(`  False GREENs: ${falseGreen}`);
+  console.log(`  False REDs:   ${falseRed}\n`);
 
-  if (pct < 90) {
-    console.warn("⚠️  Accuracy below 90% — review prompt before the challenge!");
+  if (pct < 92 || falseGreen > 0) {
+    console.warn("⚠️  Accuracy gate failed — false GREENs are unacceptable for challenge safety.");
     process.exit(1);
   } else {
     console.log("✅  Interpreter looks solid.");

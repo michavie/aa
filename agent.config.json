@@ -1,0 +1,15 @@
+{
+  "agentName": "BoN Arena Agent",
+  "manifestUri": "",
+  "metadata": [
+    {
+      "key": "version",
+      "value": "1.0.0"
+    },
+    {
+      "key": "framework",
+      "value": "agent-arena"
+    }
+  ],
+  "services": []
+}

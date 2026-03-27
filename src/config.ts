@@ -7,7 +7,7 @@ export const CONFIG = {
   // ─── Networks ─────────────────────────────────────────────────────────────
   // Battle of Nodes — main competition network (TX sending + monitoring)
   BON_API:        "https://api.battleofnodes.com",
-  BON_CHAIN:      "BON-1",
+  BON_CHAIN:      "B",
 
   // ─── Contracts ────────────────────────────────────────────────────────────
   REGISTRY_ADDRESS: "erd1qqqqqqqqqqqqqpgq4mar8ex8aj2gnc0cq7ay372eqfd5g7t33frqcg776p",

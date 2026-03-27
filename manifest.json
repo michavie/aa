@@ -1,0 +1,37 @@
+{
+  "type": "https://multiversx.com/standards/mx-8004#registration-v1",
+  "name": "BoN Arena Agent",
+  "description": "Battle of Nodes Agent Arena runner",
+  "version": "1.0.0",
+  "active": true,
+  "services": [
+    {
+      "name": "MCP",
+      "endpoint": "http://localhost:3001",
+      "version": "1.0.0"
+    }
+  ],
+  "oasf": {
+    "schemaVersion": "0.8.0",
+    "skills": [
+      {
+        "category": "Automation",
+        "items": [
+          "blockchain_automation"
+        ]
+      }
+    ],
+    "domains": [
+      {
+        "category": "Technology",
+        "items": [
+          "blockchain"
+        ]
+      }
+    ]
+  },
+  "contact": {
+    "website": "https://example.com"
+  },
+  "x402Support": false
+}

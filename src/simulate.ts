@@ -2,7 +2,7 @@
  * Local Red Light / Green Light Simulator
  *
  * Runs a fake admin wallet that sends commands to a fake target wallet,
- * both using a local MultiversX devnet or configurable API.
+ * both using a local test setup or configurable MultiversX API.
  *
  * Usage:
  *   npm run simulate
@@ -31,6 +31,12 @@ const TARGET_WALLET = process.env.TARGET_WALLET_ADDRESS || "";
 
 const GAS_LIMIT     = CONFIG.FUND_GAS;
 const GAS_PRICE     = CONFIG.GAS_PRICE;
+const MIN_GAS_LIMIT = 50_000n;
+const GAS_PER_DATA_BYTE = 1_500n;
+
+function gasLimitForCommand(command: string): bigint {
+  return MIN_GAS_LIMIT + BigInt(Buffer.byteLength(command)) * GAS_PER_DATA_BYTE;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMMAND SETS
@@ -158,7 +164,7 @@ async function sendCommand(
     value:    BigInt(0),
     receiver: new Address(TARGET_WALLET),
     sender:   new Address(adminAddress),
-    gasLimit: GAS_LIMIT,
+    gasLimit: gasLimitForCommand(command),
     gasPrice: GAS_PRICE,
     data:     Buffer.from(command),
     chainID:  CHAIN_ID,

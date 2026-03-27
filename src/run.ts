@@ -33,6 +33,8 @@ import { config as loadEnv } from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
 import { CONFIG } from "./config";
+import { findActiveWindow, loadChallengeWindows, nextWindow } from "./challenge";
+import { signerFromStoredPem, toStoredPem } from "./wallets";
 
 loadEnv();
 
@@ -50,15 +52,30 @@ const GL_PEM_PATH  = process.env.GL_PEM_FILE
 
 const AGENTS_FILE  = path.resolve(__dirname, "..", "agents.json");
 const WALLETS_DIR  = path.resolve(__dirname, "..", "wallets");
+const IS_LOCAL_TEST = process.env.LOCAL_TEST_MODE === "1";
+const LOCAL_AGENT_FUND = BigInt(process.env.LOCAL_AGENT_FUND_ATTO || "10000000000000000");
+const CHALLENGE_WINDOWS = loadChallengeWindows(process.env);
+const MAX_AGENT_FEE_BUDGET = BigInt(
+  process.env.MAX_AGENT_FEE_BUDGET_ATTO || "500000000000000000000"
+);
+const SHOULD_ENFORCE_SCHEDULE = process.env.ENFORCE_SCHEDULE !== "0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED STATE
 // ─────────────────────────────────────────────────────────────────────────────
 
 const state = {
-  isGreenLight:   false,
+  operatorGreenLight: false,
+  sendEnabled: false,
+  commandPending: false,
+  budgetExhausted: false,
+  estimatedAgentFeeSpend: 0n,
   lastSeenTxHash: "",
+  processedCommandTxs: new Set<string>(),
 };
+
+const COMMAND_HISTORY_SIZE = 100;
+const MAX_TRACKED_COMMAND_TXS = 2000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP CLIENT (keep-alive for low-latency repeated requests)
@@ -77,6 +94,8 @@ const client: AxiosInstance = axios.create({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const txComputer = new TransactionComputer();
+const MIN_GAS_LIMIT = 50_000n;
+const GAS_PER_DATA_BYTE = 1_500n;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LOGGING
@@ -86,6 +105,12 @@ const ts  = () => new Date().toISOString().slice(11, 23);
 const log  = (msg: string) => console.log( `[${ts()}] ${msg}`);
 const warn = (msg: string) => console.warn(`[${ts()}] ⚠️  ${msg}`);
 
+function txTimeLabel(tx: any): string {
+  const raw = Number(tx?.timestamp ?? 0);
+  if (!Number.isFinite(raw) || raw <= 0) return "unknown-time";
+  return new Date(raw * 1000).toISOString();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WALLET TYPES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,12 +118,6 @@ const warn = (msg: string) => console.warn(`[${ts()}] ⚠️  ${msg}`);
 interface AgentWallet {
   index: number;
   address: string;
-}
-
-function toPem(secretKey: UserSecretKey): string {
-  const address = secretKey.generatePublicKey().toAddress().bech32();
-  const combined = Buffer.from(secretKey.hex() + secretKey.generatePublicKey().hex(), "hex");
-  return `-----BEGIN PRIVATE KEY for ${address}-----\n${combined.toString("base64")}\n-----END PRIVATE KEY for ${address}-----\n`;
 }
 
 function agentPemPath(index: number): string {
@@ -123,7 +142,7 @@ function generateWallets(): AgentWallet[] {
     const mnemonic  = Mnemonic.generate();
     const secretKey = mnemonic.deriveKey(0);
     const address   = secretKey.generatePublicKey().toAddress().bech32();
-    fs.writeFileSync(agentPemPath(i), toPem(secretKey));
+    fs.writeFileSync(agentPemPath(i), toStoredPem(secretKey));
     wallets.push({ index: i, address });
     log(`  A${i}: ${address}`);
   }
@@ -147,12 +166,15 @@ function getGLAddress(): string {
 async function waitForFunds(glAddress: string): Promise<void> {
   log(`GL wallet: ${glAddress}`);
   log(`Polling for funds (distributed at 15:00 UTC)...`);
+  const minBalance = IS_LOCAL_TEST
+    ? BigInt("100000000000000000")
+    : BigInt("100000000000000000000");
 
   while (true) {
     try {
       const { data } = await client.get(`/accounts/${glAddress}`);
       const balance = BigInt(data.balance ?? "0");
-      if (balance > BigInt("100000000000000000000")) {
+      if (balance > minBalance) {
         log(`GL funded: ${fmt(balance)} EGLD — proceeding`);
         return;
       }
@@ -164,21 +186,51 @@ async function waitForFunds(glAddress: string): Promise<void> {
   }
 }
 
+function isWithinChallengeWindow(now: Date): boolean {
+  if (!SHOULD_ENFORCE_SCHEDULE || IS_LOCAL_TEST) return true;
+  return findActiveWindow(now, CHALLENGE_WINDOWS) !== null;
+}
+
+function refreshSendEnabled(): void {
+  const scheduleOpen = isWithinChallengeWindow(new Date());
+  state.sendEnabled =
+    state.operatorGreenLight &&
+    !state.commandPending &&
+    !state.budgetExhausted &&
+    scheduleOpen;
+}
+
+function estimatedFeeForTx(txCount: number): bigint {
+  return gasLimitForData(PING_DATA) * CONFIG.GAS_PRICE * BigInt(txCount);
+}
+
+function remainingAgentFeeBudget(): bigint {
+  return MAX_AGENT_FEE_BUDGET - state.estimatedAgentFeeSpend;
+}
+
+function markBudgetIfExhausted(): void {
+  if (remainingAgentFeeBudget() <= 0n) {
+    state.budgetExhausted = true;
+    refreshSendEnabled();
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE 3 — FUND AGENTS FROM GL WALLET
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fundAgents(wallets: AgentWallet[], glAddress: string): Promise<void> {
   log(`Funding ${wallets.length} agents from GL wallet...`);
+  const perAgentFund = IS_LOCAL_TEST ? LOCAL_AGENT_FUND : CONFIG.EGLD_PER_AGENT;
 
-  const glSigner = UserSigner.fromPem(fs.readFileSync(GL_PEM_PATH, "utf-8"));
+  const glSigner = signerFromStoredPem(GL_PEM_PATH);
   const { data: acct } = await client.get(`/accounts/${glAddress}`);
   let glNonce = BigInt(acct.nonce);
 
   for (const w of wallets) {
     try {
       const { data: agentAcct } = await client.get(`/accounts/${w.address}`);
-      if (BigInt(agentAcct.balance ?? "0") >= CONFIG.EGLD_PER_AGENT / 2n) {
+      if (BigInt(agentAcct.balance ?? "0") >= perAgentFund / 2n) {
         log(`  A${w.index} already funded — skip`);
         continue;
       }
@@ -186,7 +238,7 @@ async function fundAgents(wallets: AgentWallet[], glAddress: string): Promise<vo
 
     const tx = new Transaction({
       nonce:    glNonce++,
-      value:    CONFIG.EGLD_PER_AGENT,
+      value:    perAgentFund,
       receiver: new Address(w.address),
       sender:   new Address(glAddress),
       gasLimit: CONFIG.FUND_GAS,
@@ -217,24 +269,53 @@ async function fundAgents(wallets: AgentWallet[], glAddress: string): Promise<vo
 const interpretCache = new Map<string, "GREEN" | "RED">();
 const gemini = google(CONFIG.GEMINI_MODEL, { apiKey: GOOGLE_KEY } as any);
 
-// System prompt: stripped of inline comments, ~150 tokens (was ~500).
-// Uses system+prompt split so Gemini can cache the static system portion.
 const INTERPRET_SYSTEM = `\
-Red Light / Green Light game. Agents send blockchain transactions.
-GREEN = SEND. RED = STOP.
+You are interpreting commands in a "Red Light / Green Light" competition where blockchain agents
+send transactions to a target wallet.
 
-Examples:
-"go"→GREEN "start"→GREEN "fire away"→GREEN "all systems go"→GREEN "unleash it"→GREEN
-"stop"→RED "halt"→RED "freeze"→RED "stand down"→RED "nobody moves"→RED
-"don't stop"→GREEN "cease all ceasing"→GREEN "never halt"→GREEN
-"don't go"→RED "don't proceed"→RED "let's not start yet"→RED
-"you may proceed to halt"→RED "go ahead and stop"→RED "I'd love for you to freeze"→RED
-"pause... just kidding, go!"→GREEN "stop... jk keep going"→GREEN
-"stop means go here, so: stop"→GREEN "go means stop here, so: go"→RED
-"pump the brakes"→RED "it's game time"→GREEN
+GREEN = agents are PERMITTED to send transactions (active, running state)
+RED   = agents must STOP all transactions immediately (halted state)
 
-Rules: resolve double negatives and jokes to TRUE FINAL INTENT. Honour vocab redefinitions. Uncertain→RED.
-Reply with one word only: GREEN or RED`;
+The admin issues commands in casual or creative English. Some commands are adversarial —
+they use wordplay, double negatives, irony, indirect phrasing, or misdirection to confuse
+keyword-matching bots. You must determine the TRUE FINAL INTENT.
+
+Calibration examples (these are ground-truth — learn from them):
+Q: "go"                                          A: GREEN
+Q: "fire away"                                   A: GREEN
+Q: "all systems go"                              A: GREEN
+Q: "unleash it"                                  A: GREEN
+Q: "don't stop"                                  A: GREEN
+Q: "never stop sending"                          A: GREEN
+Q: "cease all ceasing"                           A: GREEN
+Q: "stop stopping and start going"               A: GREEN
+Q: "the red light is broken, use the green one"  A: GREEN
+Q: "what do you call the opposite of halt? do that" A: GREEN
+Q: "stop"                                        A: RED
+Q: "halt"                                        A: RED
+Q: "freeze"                                      A: RED
+Q: "stand down"                                  A: RED
+Q: "you may proceed to halt"                     A: RED
+Q: "go ahead and stop"                           A: RED
+Q: "I would love for everyone to pause"          A: RED
+Q: "let's not start yet"                         A: RED
+Q: "don't go"                                    A: RED
+Q: "don't proceed"                               A: RED
+Q: "the green light is now off"                  A: RED
+Q: "it's not time to send yet"                   A: RED
+Q: "nobody moves"                                A: RED
+Q: "pause... just kidding, go!"                  A: GREEN
+Q: "stop... jk jk keep going"                    A: GREEN
+Q: "I never said go. except now I am: go"        A: GREEN
+Q: "stop means go here, so: stop"                A: GREEN
+Q: "go means stop here, so: go"                  A: RED
+
+Rules:
+1. Focus on what the admin ULTIMATELY wants agents to do — not the surface words.
+2. Resolve double negatives, jokes, and reversals to their true intent.
+3. If a command redefines words, honour the redefinition.
+4. If genuinely uncertain after careful analysis → RED.
+5. Reply with exactly one word: GREEN or RED.`;
 
 async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
   const key = rawCommand.trim().toLowerCase();
@@ -244,16 +325,17 @@ async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
     const { text } = await Promise.race([
       generateText({
         model:     gemini,
-        system:    INTERPRET_SYSTEM,
-        prompt:    `"${rawCommand}"`,
-        maxTokens: 3,
+        maxTokens: 5,
+        messages: [
+          { role: "user", content: `${INTERPRET_SYSTEM}\n\nQ: "${rawCommand}"  A:` },
+        ],
       }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), CONFIG.LLM_TIMEOUT_MS)),
     ]);
 
     const result: "GREEN" | "RED" = text.trim().toUpperCase().startsWith("GREEN") ? "GREEN" : "RED";
     interpretCache.set(key, result);
-    log(`[LLM] "${rawCommand}" → ${result}`);
+    log(`[LLM] command=${JSON.stringify(rawCommand)} => ${result}`);
     return result;
   } catch (e: any) {
     warn(`LLM failed (${e?.message}) → RED`);
@@ -265,56 +347,122 @@ async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
 // MONITOR LOOP — watches admin wallet, updates shared state
 // ─────────────────────────────────────────────────────────────────────────────
 
+async function primeLastSeenTxHash(): Promise<void> {
+  if (!ADMIN_WALLET || !TARGET_WALLET) return;
+  try {
+    const { data } = await client.get(`/accounts/${TARGET_WALLET}/transactions`, {
+      params: {
+        size: COMMAND_HISTORY_SIZE,
+        order: "desc",
+        sender: ADMIN_WALLET,
+        receiver: TARGET_WALLET,
+        _t: Date.now(),
+      },
+    });
+    const txs: any[] = Array.isArray(data) ? data : [];
+    const commandTxs = txs.filter(tx =>
+      String(tx.sender || tx.senderAddress || "").toLowerCase() === ADMIN_WALLET.toLowerCase(),
+    );
+    for (const tx of commandTxs) {
+      state.processedCommandTxs.add(tx.txHash);
+    }
+    if (commandTxs.length > 0) {
+      state.lastSeenTxHash = commandTxs[0].txHash;
+      log(`Primed monitor cursor at ${state.lastSeenTxHash} (${commandTxs.length} prior admin txs ignored)`);
+    }
+  } catch (e: any) {
+    warn(`Prime monitor cursor: ${e?.message}`);
+  }
+}
+
+function rememberProcessedCommandTx(txHash: string): void {
+  state.processedCommandTxs.add(txHash);
+  if (state.processedCommandTxs.size <= MAX_TRACKED_COMMAND_TXS) return;
+  const oldest = state.processedCommandTxs.values().next().value;
+  if (oldest) state.processedCommandTxs.delete(oldest);
+}
+
 async function pollAdminCommands(senders: AgentSender[]): Promise<void> {
   if (!ADMIN_WALLET || !TARGET_WALLET) return;
   try {
-    const { data } = await client.get(`/accounts/${ADMIN_WALLET}/transactions`, {
-      params: { size: 10, order: "desc" },
+    const { data } = await client.get(`/accounts/${TARGET_WALLET}/transactions`, {
+      params: {
+        size: COMMAND_HISTORY_SIZE,
+        order: "desc",
+        sender: ADMIN_WALLET,
+        receiver: TARGET_WALLET,
+        _t: Date.now(),
+      },
     });
     const txs: any[] = Array.isArray(data) ? data : [];
-
-    // Oldest-to-newest so state changes apply in order
-    const newTxs: any[] = [];
-    for (const tx of txs) {
-      if (tx.txHash === state.lastSeenTxHash) break;
-      newTxs.unshift(tx);
-    }
+    const newTxs = txs
+      .filter(tx => {
+        const sender = String(tx.sender || tx.senderAddress || "").toLowerCase();
+        const receiver = String(tx.receiver || tx.receiverAddress || "").toLowerCase();
+        return (
+          sender === ADMIN_WALLET.toLowerCase() &&
+          receiver === TARGET_WALLET.toLowerCase() &&
+          !state.processedCommandTxs.has(tx.txHash)
+        );
+      })
+      .sort((a, b) => {
+        const timeDiff = Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0);
+        if (timeDiff !== 0) return timeDiff;
+        return String(a.txHash).localeCompare(String(b.txHash));
+      });
 
     for (const tx of newTxs) {
       const receiver: string = tx.receiver || tx.receiverAddress || "";
-      if (receiver.toLowerCase() !== TARGET_WALLET.toLowerCase()) continue;
-
       let command = "";
       try { command = tx.data ? Buffer.from(tx.data, "base64").toString("utf-8") : ""; }
       catch { command = tx.data || ""; }
+      rememberProcessedCommandTx(tx.txHash);
+      state.lastSeenTxHash = tx.txHash;
       if (!command.trim()) continue;
 
-      log(`📡 Command: "${command}"`);
+      log(
+        `📡 Admin tx=${tx.txHash} time=${txTimeLabel(tx)} sender=${tx.sender || tx.senderAddress || ""} receiver=${receiver} command=${JSON.stringify(command)}`,
+      );
+      // Any new admin command pauses senders until semantic classification finishes.
+      const previousGreen = state.operatorGreenLight;
+      const wasSending = state.sendEnabled;
+      state.commandPending = true;
+      refreshSendEnabled();
       const intent  = await interpret(command);
       const newGreen = intent === "GREEN";
+      state.commandPending = false;
+      state.operatorGreenLight = newGreen;
+      refreshSendEnabled();
+      log(
+        `🧠 Classified tx=${tx.txHash} intent=${intent} previous=${previousGreen ? "GREEN" : "RED"} current=${newGreen ? "GREEN" : "RED"} sendEnabled=${state.sendEnabled}`,
+      );
 
-      if (newGreen !== state.isGreenLight) {
-        const wasGreen = state.isGreenLight;
-        state.isGreenLight = newGreen;
-
-        if (newGreen) {
+      if (newGreen !== previousGreen) {
+        if (state.sendEnabled) {
           console.log("\n🟢🟢🟢  GREEN LIGHT — FIRING  🟢🟢🟢\n");
         } else {
           console.log("\n🔴🔴🔴  RED LIGHT — STOPPED  🔴🔴🔴\n");
           // After going red: wait for pending TXs to settle, then force-resync all nonces.
           // force=true clears stale pre-built TX queues and accepts chain nonce even if
           // lower than localNonce (some TXs may not have confirmed or may have failed).
-          if (wasGreen) {
+          if (wasSending) {
             setTimeout(async () => {
               log("Force-resyncing nonces after red light...");
               await Promise.all(senders.map(s => s.syncNonce(true)));
             }, 3_000);
           }
         }
+      } else if (!state.sendEnabled) {
+        const activeWindow = findActiveWindow(new Date(), CHALLENGE_WINDOWS);
+        const upcomingWindow = nextWindow(new Date(), CHALLENGE_WINDOWS);
+        if (state.budgetExhausted) {
+          warn("Send blocked: agent fee budget exhausted");
+        } else if (!activeWindow && SHOULD_ENFORCE_SCHEDULE && !IS_LOCAL_TEST) {
+          const label = upcomingWindow ? `${upcomingWindow.label} starts ${upcomingWindow.start.toISOString()}` : "no upcoming rounds";
+          warn(`Send blocked by schedule: ${label}`);
+        }
       }
     }
-
-    if (txs.length > 0) state.lastSeenTxHash = txs[0].txHash;
   } catch (e: any) {
     warn(`Monitor: ${e?.message}`);
   }
@@ -327,6 +475,10 @@ async function pollAdminCommands(senders: AgentSender[]): Promise<void> {
 // Shared immutable values — allocated once, reused across all TXs
 const PING_DATA  = Buffer.from("ping");
 const ZERO_VALUE = BigInt(0);
+
+function gasLimitForData(data: Buffer): bigint {
+  return MIN_GAS_LIMIT + BigInt(data.length) * GAS_PER_DATA_BYTE;
+}
 
 class AgentSender {
   readonly index:    number;
@@ -349,7 +501,7 @@ class AgentSender {
   constructor(w: AgentWallet) {
     this.index        = w.index;
     this.address      = w.address;
-    this.signer       = UserSigner.fromPem(fs.readFileSync(agentPemPath(w.index), "utf-8"));
+    this.signer       = signerFromStoredPem(agentPemPath(w.index));
     this.senderAddr   = new Address(w.address);
     this.receiverAddr = new Address(TARGET_WALLET);
   }
@@ -381,7 +533,7 @@ class AgentSender {
       value:    ZERO_VALUE,
       receiver: this.receiverAddr,
       sender:   this.senderAddr,
-      gasLimit: CONFIG.GAS_LIMIT,
+      gasLimit: gasLimitForData(PING_DATA),
       gasPrice: CONFIG.GAS_PRICE,
       data:     PING_DATA,
       chainID:  CONFIG.BON_CHAIN,
@@ -393,14 +545,14 @@ class AgentSender {
 
   // Pre-build next batch into the queue while the current one is in-flight
   async prefill(): Promise<void> {
-    if (this.building || !this.nonceSynced || !state.isGreenLight) return;
+    if (this.building || !this.nonceSynced || !state.sendEnabled) return;
     if (this.txQueue.length >= CONFIG.BATCH_SIZE * 2) return; // queue already full
 
     this.building = true;
     try {
       const toAdd = CONFIG.BATCH_SIZE * 2 - this.txQueue.length;
       for (let i = 0; i < toAdd; i++) {
-        if (!state.isGreenLight) break; // abort if red light while building
+        if (!state.sendEnabled) break; // abort if red light while building
         this.txQueue.push(await this.buildTx(this.nextNonce()));
       }
     } finally {
@@ -410,6 +562,7 @@ class AgentSender {
 
   async fireBatch(): Promise<void> {
     if (!this.nonceSynced) return;
+    if (!state.sendEnabled) return;
 
     // Use pre-built TXs from queue, or build on-demand if queue is empty
     let batch: object[] = this.txQueue.splice(0, CONFIG.BATCH_SIZE);
@@ -417,7 +570,7 @@ class AgentSender {
       const needed = CONFIG.BATCH_SIZE - batch.length;
       for (let i = 0; i < needed; i++) {
         // Bail immediately if state flipped to RED while we were building
-        if (!state.isGreenLight) {
+        if (!state.sendEnabled) {
           // Return the nonce budget we already consumed back to the queue is impossible,
           // but we must NOT send — just abort. The force-resync after RED will fix nonces.
           return;
@@ -425,6 +578,17 @@ class AgentSender {
         batch.push(await this.buildTx(this.nextNonce()));
       }
     }
+
+    const maxAffordable = Number(remainingAgentFeeBudget() / estimatedFeeForTx(1));
+    if (maxAffordable <= 0) {
+      state.budgetExhausted = true;
+      refreshSendEnabled();
+      return;
+    }
+    if (batch.length > maxAffordable) {
+      batch = batch.slice(0, maxAffordable);
+    }
+    const feeEstimate = estimatedFeeForTx(batch.length);
 
     // Broadcast all in parallel
     const results = await Promise.all(
@@ -443,8 +607,10 @@ class AgentSender {
     );
 
     const sent = results.filter(Boolean).length;
+    state.estimatedAgentFeeSpend += feeEstimate;
+    markBudgetIfExhausted();
     this.statTotal += sent;
-    if (state.isGreenLight) this.statPermitted += sent;
+    if (state.sendEnabled) this.statPermitted += sent;
 
     // Kick off prefill for next batch
     this.prefill().catch(() => {});
@@ -462,6 +628,7 @@ async function runAllAgents(wallets: AgentWallet[]): Promise<void> {
 
   log("Syncing initial nonces...");
   await Promise.all(senders.map(s => s.syncNonce()));
+  await primeLastSeenTxHash();
 
   // Shared monitor loop
   let monitorRunning = true;
@@ -475,14 +642,16 @@ async function runAllAgents(wallets: AgentWallet[]): Promise<void> {
   // Per-agent send loops — all fire independently
   const senderTimers = senders.map(sender =>
     setInterval(async () => {
-      if (state.isGreenLight) await sender.fireBatch();
+      refreshSendEnabled();
+      if (state.sendEnabled) await sender.fireBatch();
     }, CONFIG.SEND_INTERVAL_MS)
   );
 
   // Prefill loops — build TXs ahead of time to cut fire latency
   const prefillTimers = senders.map(sender =>
     setInterval(() => {
-      if (state.isGreenLight) sender.prefill().catch(() => {});
+      refreshSendEnabled();
+      if (state.sendEnabled) sender.prefill().catch(() => {});
     }, CONFIG.SEND_INTERVAL_MS / 2)
   );
 
@@ -491,11 +660,13 @@ async function runAllAgents(wallets: AgentWallet[]): Promise<void> {
     const permitted = senders.reduce((s, a) => s + a.statPermitted, 0);
     const total     = senders.reduce((s, a) => s + a.statTotal, 0);
     const perAgent  = senders.map(a => `A${a.index}:${a.statPermitted}`).join(" ");
-    log(`📊 permitted=${permitted} total=${total} | ${perAgent} | ${state.isGreenLight ? "🟢" : "🔴"}`);
+    log(`📊 permitted=${permitted} total=${total} fees≈${fmt(state.estimatedAgentFeeSpend)} EGLD | ${perAgent} | ${state.sendEnabled ? "🟢" : "🔴"}`);
   }, 15_000);
 
   const shutdown = () => {
-    state.isGreenLight = false;
+    state.operatorGreenLight = false;
+    state.commandPending = false;
+    refreshSendEnabled();
     monitorRunning = false;
     [...senderTimers, ...prefillTimers, statsTimer].forEach(clearInterval);
     const permitted = senders.reduce((s, a) => s + a.statPermitted, 0);
@@ -507,6 +678,7 @@ async function runAllAgents(wallets: AgentWallet[]): Promise<void> {
   process.on("SIGINT",  shutdown);
   process.on("SIGTERM", shutdown);
 
+  refreshSendEnabled();
   log("All agents live. Ctrl+C to stop.\n");
   await new Promise(() => {});
 }
@@ -535,7 +707,7 @@ async function main() {
     console.warn("   Add them to .env and rerun before 16:00 UTC.\n");
   }
 
-  log(`API: ${CONFIG.BON_API}  Chain: ${CONFIG.BON_CHAIN}  Agents: ${CONFIG.NUM_AGENTS}  Batch: ${CONFIG.BATCH_SIZE}/${CONFIG.SEND_INTERVAL_MS}ms`);
+  log(`API: ${CONFIG.BON_API}  Chain: ${CONFIG.BON_CHAIN}  Agents: ${CONFIG.NUM_AGENTS}  Batch: ${CONFIG.BATCH_SIZE}/${CONFIG.SEND_INTERVAL_MS}ms${IS_LOCAL_TEST ? "  [LOCAL TEST]" : ""}`);
 
   const glAddress = getGLAddress();
 
@@ -548,7 +720,7 @@ async function main() {
   // 3. Fund agents
   await fundAgents(wallets, glAddress);
 
-  log("\n✅ All agents funded. Run `npm run register` on devnet before going live.\n");
+  log("\n✅ All agents funded. Run `npm run register` on BON before going live.\n");
 
   // 4. Run
   await runAllAgents(wallets);

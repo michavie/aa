@@ -4,10 +4,13 @@
   "description": "MultiversX BoN Challenge 5 — Agent Arena",
   "scripts": {
     "start": "ts-node src/run.ts",
+    "arena:local": "LOCAL_TEST_MODE=1 LOCAL_AGENT_FUND_ATTO=10000000000000000 ts-node src/run.ts",
     "setup": "ts-node src/setup.ts",
     "setup:test": "ts-node src/wallet.ts && ts-node src/setup.ts",
     "reset": "ts-node src/reset.ts",
     "test": "jest --runInBand",
+    "type-check": "tsc --noEmit",
+    "build:manifest": "ts-node src/build-manifest.ts",
     "register": "ts-node src/register.ts",
     "simulate": "ts-node src/simulate.ts",
     "validate": "ts-node src/validate-interpreter.ts"
@@ -19,7 +22,8 @@
     "@multiversx/sdk-wallet": "^4.6.0",
     "ai": "^4.0.0",
     "axios": "^1.7.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
