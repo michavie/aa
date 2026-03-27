@@ -61,7 +61,7 @@ const EGLD_PER_AGENT = BigInt(process.env.EGLD_PER_AGENT || "4000000000000000000
 const GAS_LIMIT  = BigInt(50_000);
 const GAS_PRICE  = BigInt(1_000_000_000);
 const FUND_GAS   = BigInt(60_000);
-const REG_GAS    = BigInt(10_000_000);
+const REG_GAS    = BigInt(25_000_000); // from starter kit REGISTER gas limit
 
 const AGENTS_FILE      = path.resolve(__dirname, "..", "agents.json");
 const ROUND1_START_UTC = new Date("2026-03-27T16:00:00Z").getTime();

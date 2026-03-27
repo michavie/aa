@@ -1,0 +1,42 @@
+{
+    "buildInfo": {
+        "rustc": { "version": "1.86.0" },
+        "contractCrate": { "name": "identity-registry", "version": "0.1.0" },
+        "framework": { "name": "multiversx-sc", "version": "0.64.2" }
+    },
+    "name": "IdentityRegistry",
+    "endpoints": [
+        {
+            "docs": ["Register a new agent with name, URI, public key, optional metadata, and optional service configs."],
+            "name": "register_agent",
+            "mutability": "mutable",
+            "inputs": [
+                { "name": "name",       "type": "bytes" },
+                { "name": "uri",        "type": "bytes" },
+                { "name": "public_key", "type": "bytes" },
+                { "name": "metadata",   "type": "counted-variadic<MetadataEntry>",    "multi_arg": true },
+                { "name": "services",   "type": "counted-variadic<ServiceConfigInput>","multi_arg": true }
+            ],
+            "outputs": [],
+            "allow_multiple_var_args": true
+        }
+    ],
+    "types": {
+        "MetadataEntry": {
+            "type": "struct",
+            "fields": [
+                { "name": "key",   "type": "bytes" },
+                { "name": "value", "type": "bytes" }
+            ]
+        },
+        "ServiceConfigInput": {
+            "type": "struct",
+            "fields": [
+                { "name": "service_id", "type": "u32" },
+                { "name": "price",      "type": "BigUint" },
+                { "name": "token",      "type": "TokenId" },
+                { "name": "nonce",      "type": "u64" }
+            ]
+        }
+    }
+}
