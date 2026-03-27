@@ -270,7 +270,7 @@ async function registerAllAgents(wallets: AgentWallet[]): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const interpretCache = new Map<string, "GREEN" | "RED">();
-const gemini = google("gemini-2.0-flash-exp", { apiKey: GOOGLE_KEY } as any);
+const gemini = google("gemini-3.1-flash-lite-preview", { apiKey: GOOGLE_KEY } as any);
 
 async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
   const key = rawCommand.trim().toLowerCase();
@@ -348,11 +348,13 @@ async function pollAdminCommands(senders: AgentSender[]): Promise<void> {
           console.log("\n🟢🟢🟢  GREEN LIGHT — FIRING  🟢🟢🟢\n");
         } else {
           console.log("\n🔴🔴🔴  RED LIGHT — STOPPED  🔴🔴🔴\n");
-          // After going red: wait for pending TXs to settle, THEN resync all nonces
+          // After going red: wait for pending TXs to settle, then force-resync all nonces.
+          // force=true clears stale pre-built TX queues and accepts chain nonce even if
+          // lower than localNonce (some TXs may not have confirmed or may have failed).
           if (wasGreen) {
             setTimeout(async () => {
-              log("Resyncing nonces after red light...");
-              await Promise.all(senders.map(s => s.syncNonce()));
+              log("Force-resyncing nonces after red light...");
+              await Promise.all(senders.map(s => s.syncNonce(true)));
             }, 3_000);
           }
         }
@@ -390,15 +392,19 @@ class AgentSender {
     this.signer  = new UserSigner(UserSecretKey.fromString(w.privateKeyHex));
   }
 
-  async syncNonce(): Promise<void> {
+  // force=true: always accept chain nonce (use after RED — we've stopped, trust the chain).
+  // force=false: only move nonce forward (use at startup to not clobber pending TXs).
+  async syncNonce(force = false): Promise<void> {
     try {
       const { data } = await client.get(`/accounts/${this.address}`);
       const chainNonce = BigInt(data.nonce ?? 0);
-      // Move nonce forward only — pending TXs may not be confirmed yet
-      if (chainNonce > this.localNonce || !this.nonceSynced) {
+      if (force || chainNonce > this.localNonce || !this.nonceSynced) {
         this.localNonce = chainNonce;
         this.nonceSynced = true;
-        log(`[A${this.index}] Nonce → ${this.localNonce}`);
+        // Always clear the pre-built queue on a forced sync —
+        // stale TXs have wrong nonces and would fail immediately.
+        if (force) this.txQueue = [];
+        log(`[A${this.index}] Nonce → ${this.localNonce}${force ? " (forced)" : ""}`);
       }
     } catch (e: any) {
       warn(`[A${this.index}] Nonce sync: ${e?.message}`);
@@ -446,9 +452,14 @@ class AgentSender {
     // Use pre-built TXs from queue, or build on-demand if queue is empty
     let batch: object[] = this.txQueue.splice(0, BATCH_SIZE);
     if (batch.length < BATCH_SIZE) {
-      // Queue was empty — build synchronously
       const needed = BATCH_SIZE - batch.length;
       for (let i = 0; i < needed; i++) {
+        // Bail immediately if state flipped to RED while we were building
+        if (!state.isGreenLight) {
+          // Return the nonce budget we already consumed back to the queue is impossible,
+          // but we must NOT send — just abort. The force-resync after RED will fix nonces.
+          return;
+        }
         batch.push(await this.buildTx(this.nextNonce()));
       }
     }
@@ -460,9 +471,9 @@ class AgentSender {
           .then(() => true)
           .catch((e: any) => {
             const msg: string = e?.response?.data?.error || e?.message || "";
-            if (msg.toLowerCase().includes("nonce") && !state.isGreenLight) {
-              // Nonce error while stopped — safe to resync
-              this.syncNonce().catch(() => {});
+            if (msg.toLowerCase().includes("nonce")) {
+              // Force-resync on any nonce error so we start from correct position next green
+              this.syncNonce(true).catch(() => {});
             }
             return false;
           })

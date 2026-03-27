@@ -59,7 +59,7 @@ let statStartTime = Date.now();
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Gemini Flash — very fast and cheap, perfect for high-frequency interpretation
-const gemini = google("gemini-2.0-flash-exp", { apiKey: GOOGLE_KEY } as any);
+const gemini = google("gemini-3.1-flash-lite-preview", { apiKey: GOOGLE_KEY } as any);
 
 const http: AxiosInstance = axios.create({
   baseURL: API_URL,
