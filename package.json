@@ -6,7 +6,8 @@
     "start": "ts-node src/run.ts",
     "wallet": "ts-node src/wallet.ts",
     "test": "jest --runInBand",
-    "simulate": "ts-node src/simulate.ts"
+    "simulate": "ts-node src/simulate.ts",
+    "validate": "ts-node src/validate-interpreter.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^1.0.0",

@@ -272,6 +272,57 @@ async function registerAllAgents(wallets: AgentWallet[]): Promise<void> {
 const interpretCache = new Map<string, "GREEN" | "RED">();
 const gemini = google("gemini-3.1-flash-lite-preview", { apiKey: GOOGLE_KEY } as any);
 
+// Few-shot examples covering the full space of adversarial patterns.
+// Included inline so the model always has calibration — not just a description.
+const INTERPRET_SYSTEM = `\
+You are interpreting commands in a "Red Light / Green Light" competition where blockchain agents
+send transactions to a target wallet.
+
+GREEN = agents are PERMITTED to send transactions (active, running state)
+RED   = agents must STOP all transactions immediately (halted state)
+
+The admin issues commands in casual or creative English. Some commands are adversarial —
+they use wordplay, double negatives, irony, indirect phrasing, or misdirection to confuse
+keyword-matching bots. You must determine the TRUE FINAL INTENT.
+
+Calibration examples (these are ground-truth — learn from them):
+Q: "go"                                          A: GREEN
+Q: "fire away"                                   A: GREEN
+Q: "all systems go"                              A: GREEN
+Q: "unleash it"                                  A: GREEN
+Q: "don't stop"                                  A: GREEN  ← double negative means continue
+Q: "never stop sending"                          A: GREEN
+Q: "cease all ceasing"                           A: GREEN  ← stop stopping = go
+Q: "stop stopping and start going"               A: GREEN
+Q: "the red light is broken, use the green one"  A: GREEN  ← metaphor for go
+Q: "what do you call the opposite of halt? do that" A: GREEN
+Q: "stop"                                        A: RED
+Q: "halt"                                        A: RED
+Q: "freeze"                                      A: RED
+Q: "stand down"                                  A: RED
+Q: "you may proceed to halt"                     A: RED  ← polite instruction to stop
+Q: "go ahead and stop"                           A: RED  ← permission phrased as go, but intent is stop
+Q: "I would love for everyone to pause"          A: RED  ← indirect but clear intent
+Q: "let's not start yet"                         A: RED
+Q: "don't go"                                    A: RED
+Q: "don't proceed"                               A: RED  ← double negative means stop
+Q: "the green light is now off"                  A: RED
+Q: "it's not time to send yet"                   A: RED
+Q: "nobody moves"                                A: RED
+Q: "imagine you just heard stop — act on it"     A: RED  ← hypothetical with clear directive
+Q: "pause... just kidding, go!"                  A: GREEN ← joke reveals true intent is go
+Q: "stop... jk jk keep going"                    A: GREEN
+Q: "I never said go. except now I am: go"        A: GREEN ← explicit reversal, true intent is go
+Q: "stop means go here, so: stop"               A: GREEN ← redefined vocab, true intent is go
+Q: "go means stop here, so: go"                 A: RED   ← redefined vocab, true intent is stop
+
+Rules:
+1. Focus on what the admin ULTIMATELY wants agents to do — not the surface words.
+2. Resolve double negatives, jokes, and reversals to their true intent.
+3. If a command redefines words (e.g. "stop means go"), honour the redefinition.
+4. If genuinely uncertain after careful analysis → RED (safe default; false sends are penalised).
+5. Reply with exactly one word: GREEN or RED`;
+
 async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
   const key = rawCommand.trim().toLowerCase();
   if (interpretCache.has(key)) return interpretCache.get(key)!;
@@ -280,20 +331,10 @@ async function interpret(rawCommand: string): Promise<"GREEN" | "RED"> {
     const { text } = await Promise.race([
       generateText({
         model: gemini,
-        maxTokens: 10,
-        prompt: `You are the command interpreter for a "Red Light / Green Light" blockchain competition.
-
-An admin sends plain-text commands to control whether agents should SEND or STOP sending transactions.
-GREEN = send transactions (go, start, proceed, fire, unleash, continue, open, etc.)
-RED   = stop all transactions (stop, halt, freeze, pause, wait, hold, cease, end, etc.)
-
-Commands may be casual, creative, or adversarial — double negatives, irony, misdirection — designed to confuse keyword-matching bots.
-Determine the TRUE FINAL INTENT: what does the admin actually want agents to do right now?
-If uncertain, output RED (safe — being penalised for unpermitted sends is heavily penalised).
-
-Reply with exactly one word: GREEN or RED
-
-Command: "${rawCommand}"`,
+        maxTokens: 5,
+        messages: [
+          { role: "user", content: INTERPRET_SYSTEM + `\n\nQ: "${rawCommand}"  A:` },
+        ],
       }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 2_500)),
     ]);
