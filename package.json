@@ -4,7 +4,9 @@
   "description": "MultiversX BoN Challenge 5 — Agent Arena",
   "scripts": {
     "start": "ts-node src/run.ts",
-    "wallet": "ts-node src/wallet.ts",
+    "setup": "ts-node src/setup.ts",
+    "setup:test": "ts-node src/wallet.ts && ts-node src/setup.ts",
+    "reset": "ts-node src/reset.ts",
     "test": "jest --runInBand",
     "register": "ts-node src/register.ts",
     "simulate": "ts-node src/simulate.ts",

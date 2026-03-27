@@ -43,9 +43,13 @@ loadEnv();
 const GOOGLE_KEY    = process.env.GOOGLE_GENERATIVE_AI_API_KEY || "";
 const ADMIN_WALLET  = process.env.ADMIN_WALLET_ADDRESS         || "";
 const TARGET_WALLET = process.env.TARGET_WALLET_ADDRESS        || "";
-const GL_KEY        = process.env.GL_PRIVATE_KEY_HEX           || "";
 
-const AGENTS_FILE = path.resolve(__dirname, "..", "agents.json");
+const GL_PEM_PATH  = process.env.GL_PEM_FILE
+  ? path.resolve(process.env.GL_PEM_FILE)
+  : path.resolve(__dirname, "..", "gl.pem");
+
+const AGENTS_FILE  = path.resolve(__dirname, "..", "agents.json");
+const WALLETS_DIR  = path.resolve(__dirname, "..", "wallets");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED STATE
@@ -89,8 +93,16 @@ const warn = (msg: string) => console.warn(`[${ts()}] ⚠️  ${msg}`);
 interface AgentWallet {
   index: number;
   address: string;
-  privateKeyHex: string;
-  mnemonic: string;
+}
+
+function toPem(secretKey: UserSecretKey): string {
+  const address = secretKey.generatePublicKey().toAddress().bech32();
+  const combined = Buffer.from(secretKey.hex() + secretKey.generatePublicKey().hex(), "hex");
+  return `-----BEGIN PRIVATE KEY for ${address}-----\n${combined.toString("base64")}\n-----END PRIVATE KEY for ${address}-----\n`;
+}
+
+function agentPemPath(index: number): string {
+  return path.join(WALLETS_DIR, `agent-${index}.pem`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,18 +116,20 @@ function generateWallets(): AgentWallet[] {
     return existing;
   }
 
+  fs.mkdirSync(WALLETS_DIR, { recursive: true });
   log(`Generating ${CONFIG.NUM_AGENTS} agent wallets...`);
   const wallets: AgentWallet[] = [];
   for (let i = 0; i < CONFIG.NUM_AGENTS; i++) {
-    const mnemonic   = Mnemonic.generate();
-    const secretKey  = mnemonic.deriveKey(0);
-    const address    = secretKey.generatePublicKey().toAddress().bech32();
-    wallets.push({ index: i, address, privateKeyHex: secretKey.hex(), mnemonic: mnemonic.toString() });
+    const mnemonic  = Mnemonic.generate();
+    const secretKey = mnemonic.deriveKey(0);
+    const address   = secretKey.generatePublicKey().toAddress().bech32();
+    fs.writeFileSync(agentPemPath(i), toPem(secretKey));
+    wallets.push({ index: i, address });
     log(`  A${i}: ${address}`);
   }
 
   fs.writeFileSync(AGENTS_FILE, JSON.stringify(wallets, null, 2));
-  log(`Saved to agents.json — back this file up!`);
+  log(`Saved wallets/ and agents.json — back these up!`);
   return wallets;
 }
 
@@ -123,8 +137,11 @@ function generateWallets(): AgentWallet[] {
 // PHASE 2 — WAIT FOR GL WALLET TO BE FUNDED (polls until > 100 EGLD)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function getGLAddress(): Promise<string> {
-  return UserSecretKey.fromString(GL_KEY).generatePublicKey().toAddress().bech32();
+function getGLAddress(): string {
+  const pem   = fs.readFileSync(GL_PEM_PATH, "utf-8");
+  const match = pem.match(/-----BEGIN PRIVATE KEY for (\S+)-----/);
+  if (!match) throw new Error(`Invalid PEM file: ${GL_PEM_PATH}`);
+  return match[1];
 }
 
 async function waitForFunds(glAddress: string): Promise<void> {
@@ -154,7 +171,7 @@ async function waitForFunds(glAddress: string): Promise<void> {
 async function fundAgents(wallets: AgentWallet[], glAddress: string): Promise<void> {
   log(`Funding ${wallets.length} agents from GL wallet...`);
 
-  const glSigner = new UserSigner(UserSecretKey.fromString(GL_KEY));
+  const glSigner = UserSigner.fromPem(fs.readFileSync(GL_PEM_PATH, "utf-8"));
   const { data: acct } = await client.get(`/accounts/${glAddress}`);
   let glNonce = BigInt(acct.nonce);
 
@@ -332,7 +349,7 @@ class AgentSender {
   constructor(w: AgentWallet) {
     this.index        = w.index;
     this.address      = w.address;
-    this.signer       = new UserSigner(UserSecretKey.fromString(w.privateKeyHex));
+    this.signer       = UserSigner.fromPem(fs.readFileSync(agentPemPath(w.index), "utf-8"));
     this.senderAddr   = new Address(w.address);
     this.receiverAddr = new Address(TARGET_WALLET);
   }
@@ -510,7 +527,7 @@ async function main() {
   console.log("║  BoN Challenge 5 — Agent Arena Orchestrator  ║");
   console.log("╚══════════════════════════════════════════════╝\n");
 
-  if (!GL_KEY)     { console.error("Missing: GL_PRIVATE_KEY_HEX");           process.exit(1); }
+  if (!fs.existsSync(GL_PEM_PATH)) { console.error(`Missing GL wallet PEM: ${GL_PEM_PATH}\n  Run: npm run wallet`); process.exit(1); }
   if (!GOOGLE_KEY) { console.error("Missing: GOOGLE_GENERATIVE_AI_API_KEY"); process.exit(1); }
 
   if (!ADMIN_WALLET || !TARGET_WALLET) {
@@ -520,7 +537,7 @@ async function main() {
 
   log(`API: ${CONFIG.BON_API}  Chain: ${CONFIG.BON_CHAIN}  Agents: ${CONFIG.NUM_AGENTS}  Batch: ${CONFIG.BATCH_SIZE}/${CONFIG.SEND_INTERVAL_MS}ms`);
 
-  const glAddress = await getGLAddress();
+  const glAddress = getGLAddress();
 
   // 1. Wallets
   const wallets = generateWallets();
